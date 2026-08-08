@@ -1,0 +1,13 @@
+.env
+*.db
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+test_pulse.db
+.pytest_cache/
+.venv/
+# Temporary and local DB files
+pulse_test_run.db
+pulse.db
