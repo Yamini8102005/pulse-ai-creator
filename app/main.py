@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -22,6 +23,25 @@ from .scheduler import scheduler_loop
 
 def create_app(start_scheduler: bool = True, database_url: str | None = None, scheduler_poll_seconds: int | None = None) -> FastAPI:
     app = FastAPI(title="PULSE AI Creator")
+
+    # Configure CORS
+    if settings.frontend_origin == "*":
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    else:
+        origins = [o.strip() for o in settings.frontend_origin.split(",") if o.strip()]
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     app.state.engine = None
     app.state.sessionmaker = None
     app.state.scheduler_task = None

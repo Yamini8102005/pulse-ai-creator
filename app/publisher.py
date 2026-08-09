@@ -88,14 +88,21 @@ async def publish_cycle(agent_id: str, session: AsyncSession, llm: LLMClient, br
         return
     persona = Persona(name=agent["persona_name"], domain=agent["persona_domain"])
 
-    topics = await discover_topics()
+    try:
+        topics = await discover_topics()
+    except Exception as exc:
+        raise RuntimeError(f"Topic discovery failed: {exc}") from exc
+
     filtered: List[Topic] = []
     for topic in topics:
         if await _has_seen_topic(agent_id, topic, session, breeth):
             continue
         filtered.append(topic)
 
-    selection = await judge_topics(filtered, persona, llm)
+    try:
+        selection = await judge_topics(filtered, persona, llm)
+    except Exception as exc:
+        raise RuntimeError(f"Editorial judgment failed: {exc}") from exc
     now = datetime.now(timezone.utc)
     next_publish_at = now + timedelta(minutes=settings.publish_interval_minutes)
 

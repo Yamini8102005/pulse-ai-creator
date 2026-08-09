@@ -1,7 +1,9 @@
 import asyncio
+import os
 import pathlib
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
@@ -308,8 +310,22 @@ async def test_duplicate_scheduler_claim_protection(monkeypatch, db_path):
 
     engine = get_engine(get_db_url(db_path))
     sessionmaker = get_sessionmaker(engine)
-    task1 = asyncio.create_task(scheduler_loop(sessionmaker, poll_seconds=1))
-    task2 = asyncio.create_task(scheduler_loop(sessionmaker, poll_seconds=1))
+    task1 = asyncio.create_task(
+        scheduler_loop(
+            sessionmaker,
+            poll_seconds=1,
+            llm=DummyLLM(),
+            breeth=MockBreeth(),
+        )
+    )
+    task2 = asyncio.create_task(
+        scheduler_loop(
+            sessionmaker,
+            poll_seconds=1,
+            llm=DummyLLM(),
+            breeth=MockBreeth(),
+        )
+    )
     await asyncio.sleep(3)
     task1.cancel()
     task2.cancel()
@@ -324,6 +340,95 @@ async def test_duplicate_scheduler_claim_protection(monkeypatch, db_path):
 
 
 def test_discover_topics_live_source():
+    if not os.getenv("GEMINI_API_KEY") and not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("Skipping live topic discovery because neither GEMINI_API_KEY nor OPENAI_API_KEY is configured")
+
     topics = asyncio.run(discover_topics())
     assert isinstance(topics, list)
+    assert len(topics) > 0
     assert all(hasattr(topic, "title") for topic in topics)
+
+
+def test_llm_provider_configuration(monkeypatch):
+    from app.llm_client import LLMClient
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_KEY", "fake-key")
+    monkeypatch.setenv("LLM_API_BASE", "https://api.openai.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "gpt-test")
+
+    client = LLMClient()
+    assert client.provider == "openai"
+    assert client.api_key == "fake-key"
+    assert client.base_url == "https://api.openai.com/v1"
+    assert client.model == "gpt-test"
+
+
+def test_llm_gemini_provider_configuration(monkeypatch):
+    from app.llm_client import LLMClient
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setenv("GEMINI_API_BASE", "https://gemini.googleapis.com/v1")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    client = LLMClient()
+    assert client.provider == "gemini"
+    assert client.api_key == "fake-key"
+    assert client.base_url == "https://gemini.googleapis.com/v1"
+    assert client.model == "gemini-test"
+
+
+def test_llm_ollama_provider_configuration(monkeypatch):
+    from app.llm_client import LLMClient
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_API_BASE", "http://localhost:11434/v1")
+    monkeypatch.setenv("LLM_MODEL", "gpt-test")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    client = LLMClient()
+    assert client.provider == "ollama"
+    assert client.api_key == ""
+    assert client.base_url == "http://localhost:11434/v1"
+    assert client.model == "gpt-test"
+
+
+def test_llm_error_classification(monkeypatch):
+    from app.llm_client import LLMClient, LLMClientError
+
+    class FakeResponse:
+        status_code = 429
+        def json(self):
+            return {"error": {"code": "credit_balance_exhausted", "message": "No credits"}}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            class Resp:
+                status_code = 429
+
+                def raise_for_status(self):
+                    raise httpx.HTTPStatusError("error", request=None, response=FakeResponse())
+
+                def json(self):
+                    return {"error": {"code": "credit_balance_exhausted", "message": "No credits"}}
+
+            return Resp()
+
+    async def fake_async_client(*args, **kwargs):
+        return FakeClient()
+
+    from app import llm_client
+    original_client = httpx.AsyncClient
+    try:
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: FakeClient())
+        client = LLMClient(api_key="fake", base_url="https://example.com", model="gpt-test")
+        with pytest.raises(LLMClientError) as exc_info:
+            asyncio.run(client.chat([{"role": "system", "content": "ping"}]))
+        assert exc_info.value.category == "quota_exhausted"
+    finally:
+        monkeypatch.setattr(httpx, "AsyncClient", original_client)
